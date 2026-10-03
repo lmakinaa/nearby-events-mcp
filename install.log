@@ -1,0 +1,13 @@
+Existing /Users/ijaija/Downloads/eventbrite-mcp/.venv uses an old Python; recreating it
+Creating virtualenv at /Users/ijaija/Downloads/eventbrite-mcp/.venv with /Users/ijaija/.local/bin/python3.12
+  $ /Users/ijaija/.local/bin/python3.12 -m venv /Users/ijaija/Downloads/eventbrite-mcp/.venv
+Installing eventbrite-mcp
+  $ /Users/ijaija/Downloads/eventbrite-mcp/.venv/bin/python -m pip install --quiet --upgrade pip
+  $ /Users/ijaija/Downloads/eventbrite-mcp/.venv/bin/python -m pip install --quiet -e /Users/ijaija/Downloads/eventbrite-mcp
+Smoke-testing the server over stdio ...
+  OK, tools: search_events, daily_events, get_event, list_categories, resolve_location
+Backed up existing config to /Users/ijaija/Library/Application Support/Claude/claude_desktop_config.json.bak-20260930-163114
+
+Registered 'eventbrite' in /Users/ijaija/Library/Application Support/Claude/claude_desktop_config.json
+Fully quit and reopen Claude Desktop, then try:
+  "What free networking events are happening near me today?"

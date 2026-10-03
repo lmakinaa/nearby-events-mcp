@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+install.log
+# local launch helpers (contain your personal location)
+install.command
+publish.command
+publish.log
