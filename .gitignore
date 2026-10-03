@@ -7,3 +7,5 @@ install.log
 install.command
 publish.command
 publish.log
+push.command
+push.log

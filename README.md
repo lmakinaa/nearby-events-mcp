@@ -54,10 +54,68 @@ The installer creates `.venv`, installs the package, checks the server starts, a
 
 Options: `--lat 1.3197 --lng 103.8617` (exact point instead of a place name), `--base-url https://www.eventbrite.com` (other countries: `.co.uk`, `.ca`, `.com.au`…), `--use-browser` (see Troubleshooting), `--print-only`, `--uninstall`.
 
-<details>
-<summary>Manual setup / other MCP clients</summary>
+## Use it with other AI apps (Cursor, VS Code, Claude Code…)
 
-Point your client at the launcher, which creates `.venv` on first run:
+It's a standard MCP server, so any app that can launch local (stdio) MCP servers can use it. Only Claude Desktop is tested and set up by the installer; for the others, install once and paste a snippet.
+
+**1. Install** (Python 3.10+):
+
+```bash
+git clone https://github.com/lmakinaa/nearby-events-mcp.git
+cd nearby-events-mcp
+python3 -m venv .venv && .venv/bin/pip install -e .
+echo "$PWD/.venv/bin/python"   # copy this path for the snippets below
+```
+
+On Windows: `py -m venv .venv` then `.venv\Scripts\pip install -e .`, and the path is `...\nearby-events-mcp\.venv\Scripts\python.exe`.
+
+**2. Add it to your app.** Replace `/ABSOLUTE/PATH/...` with the path printed above and set your own location.
+
+**Cursor**: `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one project):
+
+```json
+{
+  "mcpServers": {
+    "nearby-events": {
+      "command": "/ABSOLUTE/PATH/nearby-events-mcp/.venv/bin/python",
+      "args": ["-m", "nearby_events_mcp"],
+      "env": { "NEARBY_EVENTS_DEFAULT_LOCATION": "Boon Keng, Singapore" }
+    }
+  }
+}
+```
+
+**VS Code (GitHub Copilot agent mode)**: `.vscode/mcp.json` in your workspace, or run **MCP: Open User Configuration** for all workspaces. Note the top-level key is `servers`:
+
+```json
+{
+  "servers": {
+    "nearby-events": {
+      "type": "stdio",
+      "command": "/ABSOLUTE/PATH/nearby-events-mcp/.venv/bin/python",
+      "args": ["-m", "nearby_events_mcp"],
+      "env": { "NEARBY_EVENTS_DEFAULT_LOCATION": "Boon Keng, Singapore" }
+    }
+  }
+}
+```
+
+**Claude Code**: one command (`--scope user` makes it available in every project):
+
+```bash
+claude mcp add --transport stdio --scope user \
+  --env NEARBY_EVENTS_DEFAULT_LOCATION="Boon Keng, Singapore" \
+  nearby-events -- /ABSOLUTE/PATH/nearby-events-mcp/.venv/bin/python -m nearby_events_mcp
+```
+
+**Anything else** (Windsurf, Zed, Cline, Continue…): use the same three values in that app's MCP settings: command = the python path, args = `-m nearby_events_mcp`, env = your location.
+
+Not supported yet: apps that only connect to MCP servers hosted on the internet (remote/HTTP), such as ChatGPT. This server runs locally on your machine.
+
+<details>
+<summary>Claude Desktop manual setup (without the installer)</summary>
+
+Point Claude Desktop at the launcher, which creates `.venv` on first run:
 
 ```json
 {
