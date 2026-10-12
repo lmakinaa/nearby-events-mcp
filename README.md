@@ -1,4 +1,5 @@
 # nearby-events-mcp
+<img width="800" height="993" alt="1791044251083" src="https://github.com/user-attachments/assets/82db6fd7-5f0e-4d2d-9683-7d5ffc210a33" />
 
 [![tests](https://github.com/lmakinaa/nearby-events-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/lmakinaa/nearby-events-mcp/actions/workflows/tests.yml)
 ![license](https://img.shields.io/badge/license-MIT-blue)
