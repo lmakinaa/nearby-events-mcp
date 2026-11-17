@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import FakeSite, make_event
+from conftest import FakeLuma, FakeSite, make_event, make_luma_entry
 from nearby_events_mcp import server
 from nearby_events_mcp.client import EventsClient, EventsError
 from nearby_events_mcp.config import Settings
@@ -20,12 +20,15 @@ def _payload(result):
 
 
 @pytest.fixture
-def wired(make_client, monkeypatch):
+def wired(make_client, make_luma, monkeypatch):
     fake = FakeSite([make_event(1, "A", free=True, followers=10), make_event(2, "B", pmin=9, pmax=9)],
                           page_size=50)
     c = make_client(fake, default_lat=1.3521, default_lng=103.8198)
     monkeypatch.setattr(server, "_client", c)
     monkeypatch.setattr(server, "_settings", c.s)
+    luma = FakeLuma([])  # no Luma events: Eventbrite-only expectations hold, and nothing goes live
+    monkeypatch.setattr(server, "_luma", make_luma(luma))
+    fake.luma = luma
     return fake
 
 
@@ -45,6 +48,19 @@ async def test_daily_events_one_search_per_day(wired):
     out = _payload(await server.mcp.call_tool("daily_events", {"days": 3, "start_date": "2099-01-01"}))
     assert list(out["days"]) == ["2099-01-01", "2099-01-02", "2099-01-03"]
     assert [s["event_search"]["date_range"]["from"] for s in wired.searches] == list(out["days"])
+
+
+async def test_daily_events_single_luma_chain(wired):
+    await server.mcp.call_tool("daily_events", {"days": 3, "start_date": "2099-01-01"})
+    assert len(wired.searches) == 3 and len(wired.luma.discovers) == 1  # Luma fetched once for the range
+
+
+async def test_search_events_mixes_sources(wired):
+    wired.luma.entries = [make_luma_entry(7, "L", free=True, start="2099-01-01T12:00")]
+    out = _payload(await server.mcp.call_tool("search_events", {"date": "2099-01-01", "price": "free"}))
+    assert {e["source"] for e in out["events"]} == {"eventbrite", "luma"}
+    assert out["by_source"] == {"eventbrite": 2, "luma": 1}  # the Eventbrite fake ignores price
+    assert wired.luma.discovers[0]["price"] == "free"
 
 
 async def test_no_location_error(make_client, monkeypatch):

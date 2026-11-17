@@ -1,6 +1,6 @@
 # API notes: how the event listings are fetched
 
-> Notes on the public web endpoints this project reads, recorded so contributors can fix things when they change. This project is not affiliated with or endorsed by Eventbrite; see the disclaimer in the README.
+> Notes on the public web endpoints this project reads, recorded so contributors can fix things when they change. This project is not affiliated with or endorsed by Eventbrite or Luma; see the disclaimer in the README. Sections 1–10 cover Eventbrite, section 11 covers Luma.
 
 Explored on `www.eventbrite.sg` (Singapore) on 2026-09-30 from a live browser session. These are the **same-origin endpoints the website itself uses** — they are unofficial, undocumented and can change without notice. Everything below was tested; items marked **(untested)** or **(uncertain)** were not confirmed. Use of these endpoints may be restricted by Eventbrite's Terms of Service; the official, supported route is the public API at `eventbriteapi.com` (which no longer offers a public event-search endpoint, which is why sites like this one use the internal one).
 
@@ -309,3 +309,79 @@ Implementation notes: obtain and cache the CSRF token (refresh on `401`/`403`); 
 - Place autocomplete endpoint not found.
 - Meaning of the array form of `dates`, `languages`, `continuation`, and `online_events_only` only partly confirmed.
 - Only Singapore was tested; other markets may expose different fields/filters.
+
+---
+
+## 11. Luma (`api.lu.ma`)
+
+Probed live on 2026-11-17 from Singapore with plain HTTP GETs (browser User-Agent, **no auth, no cookies**). These are the undocumented endpoints behind Luma's own discover pages, not Luma's official API (which needs a key and covers your own calendars). They can change without notice; use may be restricted by Luma's Terms of Service. Implementation: `src/nearby_events_mcp/luma.py`.
+
+### 11.1 `GET /discover/get-paginated-events`
+
+```
+GET https://api.lu.ma/discover/get-paginated-events
+    ?latitude=1.3521&longitude=103.8198&pagination_limit=50
+    [&pagination_cursor=…][&query=…][&slug=<category>][&price=free|paid]
+→ { "entries": [ … ], "has_more": true, "next_cursor": "eyJzdiI6…" }
+```
+
+- Without `query`: geo-scoped (roughly 50 km around the point) and **sorted by start time from now** (an event that started but hasn't ended can still appear first). There is no radius parameter: filter by distance client-side.
+- **With `query` the feed is different**: a global, relevance-ranked list capped at 50 entries, `has_more: false`, no `next_cursor`, start times out of order and many countries mixed in (e.g. `query=networking` from Singapore: 19 of 50 in Asia/Singapore, the rest across 20 timezones). Keyword results are therefore read as one unsorted page (no date jump, no stop rule), and can miss local events a few days out; results carry a note saying so. Some in-person entries there have `coordinate: null` and an obfuscated address; they are dropped, since their location is unknown.
+- Server-side filters that work (checked against the same request without them):
+
+| Param | Behaviour | Verified |
+|---|---|---|
+| `query` | Keyword search | yes |
+| `slug` | Category slug (§11.3); one per request | yes |
+| `price` | `free` returned only free events, `paid` only paid ones | yes |
+| `pagination_limit` | Page size; 50 used | yes |
+
+- **No date parameter.** Ignored: `start_date`, `end_date`, `date`, `start`, `from`, `after`, `before`, `starts_after`, `start_after`. `period=` → HTTP 400 here (it exists only on per-calendar `/calendar/get-items`). Other maintained users of this endpoint also filter dates client-side.
+- **No price-range parameter.** Ignored: `price_min`, `min_price`, `max_price`, `price_max`, `min_price_cents`, `max_price_cents`. Filter on `ticket_info.price.cents` / `max_price.cents` client-side (after `price=paid` narrows the feed).
+- **Cursor = date jump.** `next_cursor` is unpadded base64url of compact JSON `{"sv":"YYYY-MM-DD HH:MM:SS+00","fb":"<last evt id>"}` (sv = UTC start of the last entry). A crafted cursor with `sv` = a later instant and `"fb":""` starts the feed at that instant (tested with 2026-11-28). Undocumented, so this project:
+  1. fetches page 1 without a cursor (the in-person event nearest the search point gives the area's timezone, used to resolve `today`/`this_weekend`; `this_weekend` is Friday–Sunday, like Eventbrite's preset);
+  2. if page 1 ends before the window, jumps to the window's local midnight with a crafted cursor; on a 4xx it falls back to the feed's own cursor and pages forward (with a note);
+  3. stops paging once a page ends past midnight after the last day in the area's timezone (or `has_more` is false, or 5 pages; date-sorted searches also stop once enough events pass every filter);
+  4. always drops events outside the window: kept are events starting on or before the last day (local time of the event, else its calendar, else the area) and not ended before the first. Like Eventbrite, a multi-day event already running is included, but only when the feed reaches it: a date jump starts at the first day's midnight, so events that began earlier are skipped then.
+
+### 11.2 Entry fields used
+
+```jsonc
+{
+  "api_id": "evt-…",
+  "event": {
+    "api_id": "evt-…", "name": "…", "url": "fpsm8em6",          // page: https://luma.com/{url} (lu.ma 301s there)
+    "start_at": "2026-11-18T11:00:00.000Z", "end_at": "…Z",     // UTC
+    "timezone": "Asia/Singapore",                               // convert start/end to this for local times
+    "location_type": "offline",                                 // anything else = online
+    "coordinate": {"latitude": 1.3153, "longitude": 103.8809},
+    "geo_address_info": {
+      "mode": "shown" | "obfuscated",                           // obfuscated: exact address for guests only
+      "address": "Untangled Minds", "full_address": "…",       // only when shown
+      "sublocality": "Geylang", "city": "Singapore", "country": "Singapore"
+    },
+    "recurrence_id": null
+  },
+  "calendar": {"name": "…", "slug": null, "is_personal": false}, // organizer; personal calendars are named "Personal", so use hosts[0]
+  "hosts": [{"name": "…"}],
+  "guest_count": 27,                                            // real RSVP count (size signal); 0 when hidden
+  // event.show_guest_list: false <=> guest_count 0 (all 143 of 340 sampled entries); treated as unknown
+  "ticket_info": {
+    "is_free": false,
+    "price": {"cents": 2500, "currency": "sgd"},                // cheapest available tier
+    "max_price": {"cents": 4000, "currency": "sgd"} | null,     // null = single price
+    "is_sold_out": true, "spots_remaining": 0, "is_near_capacity": false, "require_approval": true
+  },
+  "registration_availability": "open" | "waitlist" | "sold-out"
+}
+```
+
+Currency codes are lowercase (`sgd`); they are upper-cased to match Eventbrite.
+
+### 11.3 Categories: `GET /discover/category/list-categories`
+
+12 slugs: `family, books, games, tech, food, ai, running, arts, climate, fitness, wellness, crypto`. Mapped from Eventbrite: Science & Tech→tech, Food & Drink→food, Arts→arts, Sports & Fitness→fitness, Health→wellness, Family & Education→family, Hobbies→games. Luma has no formats.
+
+### 11.4 Details: `GET /event/get?event_api_id=evt-…`
+
+Same `event`, `calendar`, `hosts`, `guest_count`, `ticket_info` as above, plus `ticket_types[]` (`name, cents, currency, type ("free"|"fiat-price"), max_capacity, spots_remaining, is_hidden, is_disabled, max_per_guest, is_flexible`), `description_mirror` (ProseMirror JSON: flattened to text), `categories[]`, `sold_out`. Observed: `ticket_info.price` is the cheapest tier *still available*; `guest_count` is 0 when the host hides the guest list (`event.show_guest_list: false`), so it is treated as unknown (`attendees: null`, left out by `size`); `description_mirror` can be `null`; free tiers have `currency: null`.

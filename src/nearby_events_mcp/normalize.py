@@ -1,4 +1,4 @@
-"""Turn raw `destination_event` objects into compact, LLM-friendly dicts."""
+"""Turn raw `destination_event` objects into compact, LLM-friendly dicts (Luma's live in luma.py)."""
 
 from __future__ import annotations
 
@@ -40,9 +40,49 @@ def html_to_text(raw: str | None, limit: int | None = None) -> str:
     text = html.unescape(text)
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
+    return clip(text, limit)
+
+
+def clip(text: str, limit: int | None) -> str:
     if limit and len(text) > limit:
-        text = text[: limit - 1].rstrip() + "…"
+        return text[: limit - 1].rstrip() + "…"
     return text
+
+
+_PM_BLOCKS = {"paragraph", "heading", "blockquote", "code_block", "list_item", "bullet_list",
+              "ordered_list", "horizontal_rule"}
+
+
+def prosemirror_to_text(doc: Any, limit: int | None = None) -> str:
+    """Flatten a ProseMirror JSON document (Luma's `description_mirror`) to plain text."""
+    out: list[str] = []
+
+    def walk(node: Any, in_item: bool = False) -> None:
+        if isinstance(node, list):
+            for n in node:
+                walk(n, in_item)
+            return
+        if not isinstance(node, dict):
+            return
+        kind = node.get("type")
+        if kind == "text":
+            out.append(str(node.get("text") or ""))
+            return
+        if kind == "hard_break":
+            out.append("\n")
+            return
+        if kind == "list_item":
+            out.append("\n• ")
+        walk(node.get("content") or [], in_item or kind == "list_item")
+        if kind in _PM_BLOCKS and not (in_item and kind == "paragraph") and kind != "list_item":
+            out.append("\n\n")
+
+    walk(doc)
+    text = "".join(out)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return clip(text, limit)
 
 
 def _money(block: dict | None) -> float | None:
@@ -101,6 +141,7 @@ def normalize_event(raw: dict, origin: tuple[float, float] | None = None) -> dic
     sales_status = sales.get("sales_status")
 
     return {
+        "source": "eventbrite",
         "id": raw.get("id") or raw.get("eventbrite_event_id"),
         "name": raw.get("name"),
         "url": raw.get("url"),
@@ -124,6 +165,8 @@ def normalize_event(raw: dict, origin: tuple[float, float] | None = None) -> dic
         "formats": tag_names("EventbriteFormat"),
         "organizer": org.get("name"),
         "organizer_followers": org.get("num_followers"),
+        "attendees": None,  # Eventbrite does not publish attendance
+        "requires_approval": None,
         "sales_status": sales_status,
         "sold_out": bool(ta.get("is_sold_out")),
         "has_tickets": ta.get("has_available_tickets"),

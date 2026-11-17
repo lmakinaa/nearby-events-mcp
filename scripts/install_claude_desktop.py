@@ -9,6 +9,7 @@ Standard library only. Does three things:
 Examples
   python scripts/install_claude_desktop.py --location "Orchard Road, Singapore"
   python scripts/install_claude_desktop.py --lat 1.3521 --lng 103.8198 --radius-km 8 --use-browser
+  python scripts/install_claude_desktop.py --location "Singapore" --sources luma
   python scripts/install_claude_desktop.py --uninstall
 """
 
@@ -46,6 +47,15 @@ def run(cmd: list[str]) -> None:
 
 
 MIN_PY = (3, 10)
+SOURCES = ("eventbrite", "luma")
+
+
+def parse_sources(raw: str) -> list[str]:
+    picked = [x.strip().lower() for x in raw.split(",") if x.strip()]
+    bad = [x for x in picked if x not in SOURCES]
+    if bad or not picked:
+        raise argparse.ArgumentTypeError(f"--sources takes a comma list of {', '.join(SOURCES)}")
+    return list(dict.fromkeys(picked))
 
 
 def py_version(python: str | Path) -> tuple[int, int] | None:
@@ -182,6 +192,8 @@ def main() -> None:
     ap.add_argument("--radius-km", type=int, default=10)
     ap.add_argument("--base-url", default="https://www.eventbrite.sg",
                     help="Eventbrite domain, e.g. https://www.eventbrite.com")
+    ap.add_argument("--sources", type=parse_sources,
+                    help="event sources to search, comma separated: eventbrite,luma (default: both)")
     ap.add_argument("--use-browser", action="store_true",
                     help="bootstrap cookies with headless Chromium (installs Playwright)")
     ap.add_argument("--csrf-token", help="csrftoken cookie copied from your browser (fallback)")
@@ -211,6 +223,8 @@ def main() -> None:
     else:
         print("! No default location set: Claude will need a place name/lat-lng in each request.\n"
               "  Re-run with --location 'Your Area, City' to make 'near me' work.")
+    if args.sources:
+        env["NEARBY_EVENTS_SOURCES"] = ",".join(args.sources)
     if args.use_browser:
         env["NEARBY_EVENTS_USE_BROWSER"] = "1"
     if args.csrf_token:

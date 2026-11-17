@@ -1,10 +1,12 @@
-"""FastMCP server exposing Eventbrite event discovery to Claude Desktop (stdio transport)."""
+"""FastMCP server exposing Eventbrite and Luma event discovery to Claude Desktop (stdio transport)."""
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import logging
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -12,25 +14,31 @@ from pydantic import Field
 
 from .client import EventsClient, EventsError
 from .config import Settings
-from .constants import CATEGORIES, FORMATS
+from .constants import CATEGORIES, FORMATS, LUMA_CATEGORIES
 from .geo import geocode
+from .luma import LumaClient, get_event_details, local_today
 from .normalize import html_to_text, normalize_ticket_class
-from .search import SearchParams, run_search
+from .search import (SearchParams, clean_event, luma_events, merge_events, plan_sources, search_eventbrite,
+                     search_sources, validate)
 
 log = logging.getLogger("nearby_events_mcp")
 
 mcp = FastMCP(
     "nearby-events",
     instructions=(
-        "Find Eventbrite events near a location. Use search_events for a single day/range, "
-        "daily_events for a per-day agenda, get_event for full details of one event. Location comes from "
-        "lat/lng or a place name, else the user's configured default. Event size is only available as "
-        "an organizer-followers proxy; say so when the user filters by size."
+        "Find events near a location from Eventbrite and Luma (each result has a `source`). Use "
+        "search_events for a single day/range, daily_events for a per-day agenda, get_event for full "
+        "details of one event (Eventbrite numeric id or Luma evt-... id). Location comes from lat/lng or "
+        "a place name, else the user's configured default. Size on Eventbrite is only an "
+        "organizer-followers proxy, on Luma it is the real RSVP count; say so when the user filters by "
+        "size. Some Luma addresses are approximate until you register. If a source is unavailable the "
+        "result says so in `notes`; mention it."
     ),
 )
 
 _settings: Settings | None = None
 _client: EventsClient | None = None
+_luma: LumaClient | None = None
 
 
 def settings() -> Settings:
@@ -45,6 +53,25 @@ def client() -> EventsClient:
     if _client is None:
         _client = EventsClient(settings())
     return _client
+
+
+def luma_client() -> LumaClient:
+    global _luma
+    if _luma is None:
+        _luma = LumaClient(settings())
+    return _luma
+
+
+def clients() -> dict[str, object]:
+    return {"eventbrite": client(), "luma": luma_client()}
+
+
+def _utcnow() -> datetime:  # patched in tests
+    return datetime.now(timezone.utc)
+
+
+def pick_sources(sources: list[str] | None) -> list[str]:
+    return list(dict.fromkeys(sources)) if sources else list(settings().sources)
 
 
 async def resolve_origin(lat: float | None, lng: float | None, location: str | None) -> tuple[float, float, str]:
@@ -65,11 +92,15 @@ async def resolve_origin(lat: float | None, lng: float | None, location: str | N
 Price = Literal["any", "free", "paid"]
 Sort = Literal["distance", "date", "price", "popularity"]
 Size = Literal["small", "medium", "large"]
+Source = Literal["eventbrite", "luma"]
+SIZE_HELP = ("small, medium or large. Eventbrite: PROXY by organizer followers (<200, 200-2000, >2000). "
+             "Luma: real RSVP count (<30, 30-150, 150+)")
+SOURCES_HELP = "Which sources to search: eventbrite, luma (default: all configured)"
 
 
 @mcp.tool()
 async def search_events(
-    date: Annotated[str, Field(description="today, tomorrow, this_week, this_weekend, this_month or YYYY-MM-DD")] = "today",
+    date: Annotated[str, Field(description="today, tomorrow, this_week, this_weekend (Fri-Sun), this_month or YYYY-MM-DD")] = "today",
     date_to: Annotated[str | None, Field(description="Inclusive range end YYYY-MM-DD (then `date` must be YYYY-MM-DD)")] = None,
     location: Annotated[str | None, Field(description="Place name to search around, e.g. 'Marina Bay, Singapore'. Ignored if lat/lng given")] = None,
     lat: Annotated[float | None, Field(description="Latitude of search centre")] = None,
@@ -79,12 +110,12 @@ async def search_events(
     price: Annotated[Price, Field(description="any, free or paid")] = "any",
     max_price: Annotated[float | None, Field(description="Cheapest ticket must cost at most this (event currency; free events pass)")] = None,
     min_price: Annotated[float | None, Field(description="Most expensive ticket must cost at least this")] = None,
-    categories: Annotated[list[str] | None, Field(description="Category names or ids, OR-ed. e.g. ['Business','Music']. See list_categories")] = None,
-    formats: Annotated[list[str] | None, Field(description="Format names or ids, OR-ed. e.g. ['Networking','Conference']")] = None,
-    size: Annotated[Size | None, Field(description="PROXY: organizer followers small<200, medium 200-2000, large>2000")] = None,
-    min_followers: Annotated[int | None, Field(description="Minimum organizer followers (size proxy)")] = None,
-    max_followers: Annotated[int | None, Field(description="Maximum organizer followers (size proxy)")] = None,
-    min_capacity: Annotated[int | None, Field(description="Min total ticket capacity; only known for a minority of events, unknown are kept. Triggers extra requests")] = None,
+    categories: Annotated[list[str] | None, Field(description="Category names or ids, OR-ed. e.g. ['Business','Music','AI']. See list_categories; each source uses the ones it knows")] = None,
+    formats: Annotated[list[str] | None, Field(description="Format names or ids, OR-ed. e.g. ['Networking','Conference']. Eventbrite only (Luma is skipped)")] = None,
+    size: Annotated[Size | None, Field(description=SIZE_HELP)] = None,
+    min_followers: Annotated[int | None, Field(description="Minimum organizer followers (Eventbrite size proxy; Luma events unaffected)")] = None,
+    max_followers: Annotated[int | None, Field(description="Maximum organizer followers (Eventbrite size proxy; Luma events unaffected)")] = None,
+    min_capacity: Annotated[int | None, Field(description="Min total ticket capacity (Eventbrite); only known for a minority of events, unknown are kept. Triggers extra requests")] = None,
     max_capacity: Annotated[int | None, Field(description="Max total ticket capacity; see min_capacity")] = None,
     include_capacity: Annotated[bool, Field(description="Look up ticket capacity for each result (slower)")] = False,
     start_after: Annotated[str | None, Field(description="Local start time not before HH:MM (24h)")] = None,
@@ -94,9 +125,11 @@ async def search_events(
     include_ended: Annotated[bool, Field(description="Include events that already finished today")] = False,
     sort: Annotated[Sort, Field(description="distance, date, price or popularity")] = "distance",
     max_results: Annotated[int, Field(description="Max events returned", ge=1, le=100)] = 20,
+    sources: Annotated[list[Source] | None, Field(description=SOURCES_HELP)] = None,
 ) -> dict:
-    """Search Eventbrite events around a location with filters for date, price, category, format,
-    time of day and (proxy) size. Returns compact JSON: events with venue, distance, price, organizer."""
+    """Search Eventbrite and Luma events around a location with filters for date, price, category,
+    format, time of day and size. Returns compact JSON: events with source, venue, distance, price,
+    organizer (Luma events also carry `attendees`), plus `notes` and per-source counts."""
     la, ln, label = await resolve_origin(lat, lng, location)
     p = SearchParams(
         date=date, date_to=date_to, query=query, radius_km=radius_km, price=price,
@@ -106,7 +139,7 @@ async def search_events(
         start_after=start_after, start_before=start_before, include_online=include_online,
         available_only=available_only, include_ended=include_ended, sort=sort, max_results=max_results,
     )
-    result = await run_search(client(), p, (la, ln))
+    result = await search_sources(clients(), p, (la, ln), pick_sources(sources))
     return {"origin": {"lat": la, "lng": ln, "label": label, "radius_km": round(radius_km)}, **result}
 
 
@@ -123,41 +156,112 @@ async def daily_events(
     max_price: float | None = None,
     categories: list[str] | None = None,
     formats: list[str] | None = None,
-    size: Size | None = None,
+    size: Annotated[Size | None, Field(description=SIZE_HELP)] = None,
     start_after: str | None = None,
     start_before: str | None = None,
     include_online: bool = False,
     available_only: bool = True,
     max_per_day: Annotated[int, Field(ge=1, le=50)] = 10,
+    sources: Annotated[list[Source] | None, Field(description=SOURCES_HELP)] = None,
 ) -> dict:
-    """Day-by-day agenda of nearby events (one search per day), same filters as search_events.
-    Results per day are sorted by start time."""
+    """Day-by-day agenda of nearby events, same filters as search_events. Eventbrite is searched once
+    per day; Luma once for the whole range. Results per day are sorted by start time. Without
+    start_date the first day is today in the search area's timezone."""
     la, ln, label = await resolve_origin(lat, lng, location)
-    first = date.fromisoformat(start_date) if start_date else date.today()
+    base = SearchParams(
+        date=start_date or date.today().isoformat(), query=query, radius_km=radius_km, price=price, max_price=max_price,
+        categories=categories or [], formats=formats or [], size=size, start_after=start_after,
+        start_before=start_before, include_online=include_online, available_only=available_only,
+        sort="date", max_results=max_per_day,
+    )
+    validate(base)
+    plans, notes = plan_sources(base, pick_sources(sources))
+
+    # The first day: start_date, else "today" where the search is. Luma's first page reveals the
+    # area's timezone, so Eventbrite waits for it (or for Luma to fail) before building its days.
+    first_day: asyncio.Future[date] = asyncio.get_running_loop().create_future()
+    if start_date:
+        first_day.set_result(date.fromisoformat(start_date))
+    elif "luma" not in plans:
+        first_day.set_result(date.today())
+    now = _utcnow()
+
+    def span(first: date) -> list[str]:
+        return [(first + timedelta(days=i)).isoformat() for i in range(days)]
+
+    async def eventbrite_days() -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for day in span(await first_day):
+            out[day] = await search_eventbrite(client(), dataclasses.replace(plans["eventbrite"]["p"], date=day),
+                                               (la, ln))
+        return out
+
+    def luma_window(tz_name: str | None) -> tuple[date, date]:
+        first = date.fromisoformat(start_date) if start_date else local_today(now, tz_name)
+        if not first_day.done():
+            first_day.set_result(first)
+        return first, first + timedelta(days=days - 1)
+
+    async def luma_range() -> tuple[list[dict], bool, list[str]]:
+        lp = dataclasses.replace(plans["luma"]["p"], max_results=max_per_day * days,
+                                 max_pages=min(15, 4 + days))
+        try:
+            kept, _, more, lnotes = await luma_events(luma_client(), lp, (la, ln), plans["luma"]["slugs"],
+                                                      now=now, early_stop=False, window=luma_window)
+        finally:
+            if not first_day.done():  # Luma failed before its first page
+                first_day.set_result(date.today())
+        return kept, more, lnotes
+
+    jobs = {}
+    if "eventbrite" in plans:
+        jobs["eventbrite"] = eventbrite_days()
+    if "luma" in plans:
+        jobs["luma"] = luma_range()
+    results = dict(zip(jobs, await asyncio.gather(*jobs.values(), return_exceptions=True)))
+    failed = {k: v for k, v in results.items() if isinstance(v, Exception)}
+    for err in failed.values():
+        if isinstance(err, ValueError):
+            raise err
+    if jobs and len(failed) == len(jobs):
+        raise EventsError("All event sources failed. " + " | ".join(f"{k} unavailable: {v}" for k, v in failed.items()))
+    notes.extend(f"{k} unavailable: {v}" for k, v in failed.items())
+
+    ok = {k: v for k, v in results.items() if k not in failed}
+    eb_days: dict[str, dict] = ok.get("eventbrite") or {}  # type: ignore[assignment]
+    luma_kept, luma_more, luma_notes = ok.get("luma") or ([], False, [])  # type: ignore[misc]
+    notes.extend(n for n in luma_notes if n not in notes)
+    for res in eb_days.values():
+        notes.extend(n for n in res["notes"] if n not in notes)
+    buckets: dict[str, list[dict]] = {}
+    day_list = span(first_day.result())
+    for ev in luma_kept:
+        # Multi-day events already running on the first day go under that day.
+        buckets.setdefault(max((ev["start"] or "")[:10], day_list[0]), []).append(clean_event(ev))
+    last_luma_day = max(buckets) if buckets else day_list[0]
+
     agenda: dict[str, dict] = {}
-    for i in range(days):
-        day = (first + timedelta(days=i)).isoformat()
-        p = SearchParams(
-            date=day, query=query, radius_km=radius_km, price=price, max_price=max_price,
-            categories=categories or [], formats=formats or [], size=size, start_after=start_after,
-            start_before=start_before, include_online=include_online, available_only=available_only,
-            sort="date", max_results=max_per_day,
-        )
-        res = await run_search(client(), p, (la, ln))
-        agenda[day] = {"count": res["count"], "more_available": res["more_available"],
-                       "events": res["events"]}
+    for day in day_list:
+        eb = eb_days.get(day) or {"events": [], "more_available": False}
+        merged, _ = merge_events([eb["events"], buckets.get(day, [])], base)
+        out = merged[:max_per_day]
+        more = eb["more_available"] or len(merged) > len(out) or (luma_more and day >= last_luma_day)
+        agenda[day] = {"count": len(out), "more_available": more, "events": out}
+    if luma_more:
+        notes.append(f"Luma results stop at {last_luma_day}; later days may be missing Luma events.")
     return {"origin": {"lat": la, "lng": ln, "label": label, "radius_km": round(radius_km)},
-            "days": agenda}
+            "notes": notes, "days": agenda}
 
 
 @mcp.tool()
 async def get_event(
-    event_id: Annotated[str, Field(description="Eventbrite event id (the `id` field from search results)")],
+    event_id: Annotated[str, Field(description="The `id` from search results: Eventbrite numeric id or Luma evt-... id")],
     include_description: bool = True,
     include_tickets: bool = True,
 ) -> dict:
     """Full details for one event: times, description text, ticket tiers with prices and capacity."""
-    import asyncio
+    if event_id.strip().startswith("evt-"):
+        return await get_event_details(luma_client(), event_id.strip(), include_description, include_tickets)
 
     c = client()
     ev = await c.get_event(event_id)
@@ -176,6 +280,7 @@ async def get_event(
     venue = ok.get("venue") or {}
     org = ok.get("org") or {}
     out = {
+        "source": "eventbrite",
         "id": ev.get("id"),
         "name": (ev.get("name") or {}).get("text"),
         "url": ev.get("url"),
@@ -211,10 +316,13 @@ async def get_event(
 
 @mcp.tool()
 async def list_categories() -> dict:
-    """Valid category and format names/ids for the `categories` and `formats` filters."""
+    """Valid category and format names/ids for the `categories` and `formats` filters.
+    Eventbrite categories map to the closest Luma one where there is one (e.g. Science & Tech -> Tech);
+    Luma-only names such as AI or Crypto search Luma only. Formats are Eventbrite-only."""
     return {
         "categories": {str(k): v for k, v in CATEGORIES.items()},
         "formats": {str(k): v for k, v in FORMATS.items()},
+        "luma_categories": dict(LUMA_CATEGORIES),
     }
 
 

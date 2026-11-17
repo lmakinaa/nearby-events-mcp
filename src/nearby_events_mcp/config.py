@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .constants import SOURCES as ALL_SOURCES
+
 DEFAULT_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -21,13 +23,20 @@ def _float(name: str) -> float | None:
         return None
 
 
+def _sources(name: str) -> tuple[str, ...]:
+    """Comma list of event sources; unknown names are ignored, empty means all."""
+    raw = [x.strip().lower() for x in os.environ.get(name, "").split(",") if x.strip()]
+    picked = tuple(dict.fromkeys(x for x in raw if x in ALL_SOURCES))
+    return picked or ALL_SOURCES
+
+
 def _bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
 class Settings:
-    # Which Eventbrite domain to talk to. Any regional domain works (.sg, .com, .co.uk ...).
+    # Which Eventbrite domain to talk to (Luma has a single global API). Any regional domain works (.sg, .com, .co.uk ...).
     base_url: str = "https://www.eventbrite.sg"
     user_agent: str = DEFAULT_UA
     timeout: float = 25.0
@@ -44,6 +53,9 @@ class Settings:
     csrf_token: str | None = None  # value of the `csrftoken` cookie copied from your browser
     cookies: str | None = None  # raw "a=b; c=d" cookie string copied from your browser
     use_browser: bool = False  # bootstrap cookies with headless Chromium (needs [browser] extra)
+
+    # Event sources searched by default ("eventbrite", "luma"); tools can override per call.
+    sources: tuple[str, ...] = ALL_SOURCES
 
     extra: dict = field(default_factory=dict)
 
@@ -62,4 +74,5 @@ class Settings:
             csrf_token=os.environ.get("NEARBY_EVENTS_CSRF_TOKEN", "").strip() or None,
             cookies=os.environ.get("NEARBY_EVENTS_COOKIES", "").strip() or None,
             use_browser=_bool("NEARBY_EVENTS_USE_BROWSER"),
+            sources=_sources("NEARBY_EVENTS_SOURCES"),
         )
