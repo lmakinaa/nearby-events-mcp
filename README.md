@@ -13,7 +13,24 @@ Claude: 3 events. Closest is 1.2 km away at 19:00, free, organizer has 4.6k foll
 
 An [MCP](https://modelcontextprotocol.io) server that gives Claude Desktop (or any MCP client) live, local event search: by day or date range, distance, price, category, format, time of day and a "size" signal. It reads the public event listings on **Eventbrite** and **Luma** (where much of the tech, AI, startup and community scene lists its events) and merges them; every result says which `source` it came from.
 
-<img width="800" height="993" alt="1791044251083" src="https://github.com/user-attachments/assets/82db6fd7-5f0e-4d2d-9683-7d5ffc210a33" />
+<img width="800" height="993" alt="Claude Desktop answering a nearby-events question with a ranked list of events" src="https://github.com/user-attachments/assets/82db6fd7-5f0e-4d2d-9683-7d5ffc210a33" />
+
+## Why it's useful
+
+Finding the right event usually means checking several sites, each with its own filters
+and none covering everything, then cross-checking distance and time by hand. Luma, where
+much of the tech, AI and startup scene posts events, has no date or radius search at all.
+This server lets you ask one question in plain language and get a merged, filtered answer
+from both sources, together with what each source couldn't tell you.
+
+It is also a compact example of building a reliable agent tool on top of sources you
+don't control:
+
+- **Two sources, one schema.** Eventbrite and Luma listings normalise to the same compact record, and every result carries its `source`.
+- **Filters the sites can't do are done server-side:** price ranges, time-of-day windows, radius and dates on Luma, and a per-source "size" signal.
+- **Graceful degradation.** If one source is down or blocks the session, the other still answers, and the response says which one failed.
+- **Honest data.** Approximate addresses, hidden guest lists and incomplete keyword coverage are reported to the model instead of hidden.
+- **Polite by design.** Requests are throttled, nothing is stored, and CI runs fully mocked tests on every push.
 
 > ## ⚠️ Disclaimer — read before using
 >
